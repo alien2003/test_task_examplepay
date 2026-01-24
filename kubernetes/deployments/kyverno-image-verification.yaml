@@ -1,0 +1,57 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+  annotations:
+    policies.kyverno.io/title: Verify Image Signatures
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Ensures all container images in production namespaces are signed
+      with cosign and originate from the approved ECR registry.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: verify-cosign-signature
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - payments
+                - risk-engine
+                - fraud-detection
+      verifyImages:
+        - imageReferences:
+            - "*.dkr.ecr.*.amazonaws.com/examplepay/*"
+          attestors:
+            - entries:
+                - keys:
+                    publicKeys: |-
+                      -----BEGIN PUBLIC KEY-----
+                      <INSERT_COSIGN_PUBLIC_KEY>
+                      -----END PUBLIC KEY-----
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+    - name: restrict-image-registries
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - payments
+                - risk-engine
+                - fraud-detection
+      validate:
+        message: "Images must come from the approved ECR registry."
+        pattern:
+          spec:
+            containers:
+              - image: "*.dkr.ecr.*.amazonaws.com/examplepay/*"
+            =(initContainers):
+              - image: "*.dkr.ecr.*.amazonaws.com/examplepay/*"

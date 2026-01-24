@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: payment-service-health
+  namespace: payments
+spec:
+  args:
+    - name: service-name
+  metrics:
+    - name: p99-latency
+      interval: 30s
+      count: 10
+      successCondition: result[0] < 0.250
+      failureLimit: 3
+      provider:
+        prometheus:
+          address: http://prometheus-operated.monitoring:9090
+          query: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{
+                service="{{args.service-name}}",
+                namespace="payments"
+              }[5m])) by (le)
+            )
+    - name: error-rate
+      interval: 30s
+      count: 10
+      successCondition: result[0] < 0.001
+      failureLimit: 3
+      provider:
+        prometheus:
+          address: http://prometheus-operated.monitoring:9090
+          query: |
+            sum(rate(http_requests_total{
+              service="{{args.service-name}}",
+              namespace="payments",
+              code=~"5.."
+            }[5m]))
+            /
+            sum(rate(http_requests_total{
+              service="{{args.service-name}}",
+              namespace="payments"
+            }[5m]))

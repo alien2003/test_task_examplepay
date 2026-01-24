@@ -1,0 +1,41 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: payment-service-egress
+  namespace: payments
+spec:
+  endpointSelector:
+    matchLabels:
+      app: payment-service
+  egress:
+    # Allow communication with ledger-service on port 8443
+    - toEndpoints:
+        - matchLabels:
+            app: ledger-service
+            "k8s:io.kubernetes.pod.namespace": payments
+      toPorts:
+        - ports:
+            - port: "8443"
+              protocol: TCP
+    # Allow access to AWS Secrets Manager via VPC endpoint
+    - toCIDR:
+        - 10.10.0.0/16
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # Allow DNS resolution via CoreDNS
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+  egressDeny:
+    # Deny all other egress (implicit with the above allowlist, but explicit for clarity)
+    - toEntities:
+        - world

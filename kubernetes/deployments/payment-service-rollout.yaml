@@ -1,0 +1,126 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: payment-service
+  namespace: payments
+  labels:
+    app: payment-service
+spec:
+  replicas: 6
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: payment-service
+  strategy:
+    blueGreen:
+      activeService: payment-service-active
+      previewService: payment-service-preview
+      autoPromotionEnabled: false
+      prePromotionAnalysis:
+        templates:
+          - templateName: payment-service-health
+        args:
+          - name: service-name
+            value: payment-service-preview
+      scaleDownDelaySeconds: 300
+      previewReplicaCount: 6
+      abortScaleDownDelaySeconds: 600
+  template:
+    metadata:
+      labels:
+        app: payment-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: payment-service
+      terminationGracePeriodSeconds: 60
+      tolerations:
+        - key: dedicated
+          value: payments
+          effect: NoSchedule
+      nodeSelector:
+        workload-type: latency-sensitive
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: payment-service
+      containers:
+        - name: payment-service
+          image: ECR_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/examplepay/payment-service:latest
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: payment-service-secrets
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 5
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 15"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service-active
+  namespace: payments
+  labels:
+    app: payment-service
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: payment-service
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service-preview
+  namespace: payments
+  labels:
+    app: payment-service
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: payment-service
