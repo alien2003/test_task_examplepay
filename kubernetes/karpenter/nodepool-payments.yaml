@@ -1,0 +1,82 @@
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: payments
+spec:
+  weight: 100
+  template:
+    metadata:
+      labels:
+        team: payments
+        workload-type: latency-sensitive
+    spec:
+      taints:
+        - key: dedicated
+          value: payments
+          effect: NoSchedule
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values:
+            - m6i.xlarge
+            - m6i.2xlarge
+            - m7i.xlarge
+            - m7i.2xlarge
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values:
+            - us-east-1a
+            - us-east-1b
+            - us-east-1c
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: payments
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+    budgets:
+      - nodes: "10%"
+  limits:
+    cpu: "256"
+    memory: 1024Gi
+---
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: payments
+spec:
+  role: "KarpenterNodeRole-examplepay-prod"
+  amiSelectorTerms:
+    - alias: al2023@latest
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "examplepay-prod"
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "examplepay-prod"
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 100Gi
+        volumeType: gp3
+        iops: 5000
+        throughput: 250
+        encrypted: true
+        deleteOnTermination: true
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 1
+    httpTokens: required
+  tags:
+    Environment: prod
+    Team: payments
+    ManagedBy: karpenter
