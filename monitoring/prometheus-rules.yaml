@@ -1,0 +1,189 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: examplepay-critical
+  namespace: monitoring
+  labels:
+    release: prometheus
+    app: kube-prometheus-stack
+spec:
+  groups:
+    ##########################################################################
+    # EKS Control Plane Availability
+    ##########################################################################
+    - name: eks.control-plane
+      rules:
+        - alert: EKSAPIServerDown
+          expr: |
+            up{job="apiserver"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "EKS API server is unreachable"
+            description: "The Kubernetes API server has been down for more than 5 minutes. Cluster operations are impacted."
+            runbook_url: "https://docs.examplepay.internal/runbooks/eks-apiserver-down"
+
+        - alert: EKSAPIServerHighLatency
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(apiserver_request_duration_seconds_bucket{verb!="WATCH"}[5m])) by (le, verb)
+            ) > 1
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "EKS API server P99 latency is high"
+            description: "API server P99 latency for {{ $labels.verb }} requests exceeds 1s for 10 minutes."
+
+    ##########################################################################
+    # Payment Transaction SLO - Multi-Window Burn Rate
+    ##########################################################################
+    - name: slo.payment-transactions
+      rules:
+        # Recording rules for error budget burn rate
+        - record: payment_service:error_ratio:rate5m
+          expr: |
+            sum(rate(http_requests_total{namespace="payments", app="payment-service", code=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{namespace="payments", app="payment-service"}[5m]))
+
+        - record: payment_service:error_ratio:rate30m
+          expr: |
+            sum(rate(http_requests_total{namespace="payments", app="payment-service", code=~"5.."}[30m]))
+            /
+            sum(rate(http_requests_total{namespace="payments", app="payment-service"}[30m]))
+
+        - record: payment_service:error_ratio:rate1h
+          expr: |
+            sum(rate(http_requests_total{namespace="payments", app="payment-service", code=~"5.."}[1h]))
+            /
+            sum(rate(http_requests_total{namespace="payments", app="payment-service"}[1h]))
+
+        - record: payment_service:error_ratio:rate6h
+          expr: |
+            sum(rate(http_requests_total{namespace="payments", app="payment-service", code=~"5.."}[6h]))
+            /
+            sum(rate(http_requests_total{namespace="payments", app="payment-service"}[6h]))
+
+        # SLO: 99.95% success rate = 0.05% error budget
+        # Multi-window burn rate alerts (Google SRE approach)
+        - alert: PaymentSLOBurnRateCritical
+          expr: |
+            (
+              payment_service:error_ratio:rate5m > (14.4 * 0.0005)
+              and
+              payment_service:error_ratio:rate1h > (14.4 * 0.0005)
+            )
+          for: 2m
+          labels:
+            severity: critical
+            team: payments
+            slo: payment-transactions
+          annotations:
+            summary: "Payment service error budget burning fast (critical)"
+            description: "Payment service is consuming error budget at 14.4x the sustainable rate. At this rate, the monthly budget will be exhausted in 2 hours."
+            runbook_url: "https://docs.examplepay.internal/runbooks/payment-slo-breach"
+
+        - alert: PaymentSLOBurnRateHigh
+          expr: |
+            (
+              payment_service:error_ratio:rate30m > (6 * 0.0005)
+              and
+              payment_service:error_ratio:rate6h > (6 * 0.0005)
+            )
+          for: 5m
+          labels:
+            severity: warning
+            team: payments
+            slo: payment-transactions
+          annotations:
+            summary: "Payment service error budget burning (warning)"
+            description: "Payment service is consuming error budget at 6x the sustainable rate. At this rate, the monthly budget will be exhausted in 5 hours."
+
+        - alert: PaymentP99LatencyHigh
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{
+                namespace="payments",
+                app="payment-service"
+              }[5m])) by (le)
+            ) > 0.250
+          for: 5m
+          labels:
+            severity: warning
+            team: payments
+          annotations:
+            summary: "Payment service P99 latency exceeds 250ms SLO"
+            description: "Payment service P99 latency is {{ $value | humanizeDuration }}, exceeding the 250ms target."
+
+    ##########################################################################
+    # Node Pressure
+    ##########################################################################
+    - name: node.pressure
+      rules:
+        - alert: NodeHighCPUPressure
+          expr: |
+            (1 - avg by(node) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 0.85
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Node {{ $labels.node }} CPU usage above 85%"
+            description: "Node {{ $labels.node }} has sustained CPU usage above 85% for 10 minutes. Karpenter should provision additional capacity."
+
+        - alert: NodeHighMemoryPressure
+          expr: |
+            (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.90
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Node {{ $labels.node }} memory usage above 90%"
+            description: "Node {{ $labels.node }} has less than 10% available memory. Risk of OOM kills."
+
+        - alert: NodeDiskPressure
+          expr: |
+            (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) > 0.85
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Node {{ $labels.node }} disk usage above 85%"
+            description: "Root filesystem on {{ $labels.node }} is {{ $value | humanizePercentage }} full."
+
+    ##########################################################################
+    # Karpenter Provisioning
+    ##########################################################################
+    - name: karpenter.provisioning
+      rules:
+        - alert: KarpenterProvisioningFailures
+          expr: |
+            sum(increase(karpenter_provisioner_scheduling_simulation_duration_seconds_count{result="error"}[10m])) > 0
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "Karpenter is failing to provision nodes"
+            description: "Karpenter has encountered provisioning errors in the last 10 minutes. Workloads may be stuck in Pending state."
+            runbook_url: "https://docs.examplepay.internal/runbooks/karpenter-provisioning-failure"
+
+        - alert: KarpenterNodePoolNearLimit
+          expr: |
+            karpenter_nodepools_usage{resource_type="cpu"}
+            /
+            karpenter_nodepools_limit{resource_type="cpu"}
+            > 0.85
+          for: 15m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Karpenter NodePool {{ $labels.nodepool }} approaching CPU limit"
+            description: "NodePool {{ $labels.nodepool }} is at {{ $value | humanizePercentage }} of its CPU limit."
